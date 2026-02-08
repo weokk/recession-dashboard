@@ -5,111 +5,115 @@ import plotly.graph_objects as go
 from datetime import datetime
 
 # 页面配置
-st.set_page_config(page_title="非传统衰退指标看板", layout="wide")
+st.set_page_config(page_title="经济衰退非传统指标", layout="wide")
 
-st.title("📊 非传统经济衰退预警看板")
-st.markdown("""
-根据 *HuffPost* 报道，我们通过监控以下指标来观察经济健康度：
-1. **口红效应**：个人护理零售额占总零售比例。
-2. **男士内裤指标**：男装零售趋势。
-""")
+st.title("📊 非传统经济衰退预警看板 (V2.0)")
+st.markdown("同步监控：**口红效应**（红色）、**男装指标**（蓝色）与**官方衰退期**（阴影）。")
 
-# --- 环境变量处理 ---
+# --- 环境变量 ---
 if "FRED_API_KEY" in st.secrets:
     api_key = st.secrets["FRED_API_KEY"]
 else:
-    st.error("未找到环境变量 'FRED_API_KEY'。请在 Streamlit Secrets 中配置。")
+    st.error("请先在 Streamlit Secrets 中设置 FRED_API_KEY")
     st.stop()
 
-# --- 侧边栏配置 ---
-st.sidebar.header("时间范围")
-current_year = datetime.now().year
-start_year = st.sidebar.slider("选择起始年份", 2000, current_year, 2010)
+# --- 侧边栏 ---
+start_year = st.sidebar.slider("起始年份", 2000, 2025, 2008)
 
-# --- 数据获取函数 ---
 @st.cache_data(ttl=86400)
-def get_economic_data(api_key, start_date):
+def get_pro_data(api_key, start_date):
     fred = Fred(api_key=api_key)
-    
-    # 重新优化的 Series ID 映射表
+    # 使用目前最稳定的 ID
     series_map = {
-        'Unemployment': 'UNRATE',                  # 失业率
-        'Lipstick_Proxy': 'MRTSSM44611USS',        # 药妆零售 (Health and Personal Care)
-        'Menswear_Proxy': 'RETAILMCL',             # 男装商店零售 (更稳健的 ID)
-        'Total_Retail': 'RSXFS'                    # 零售总额
+        'Unemployment': 'UNRATE',           # 失业率
+        'Lipstick_Proxy': 'MRTSSM44611USS', # 药妆零售
+        'Menswear_Proxy': 'MRTSSM44811USS', # 男装零售 (已更换为稳定版)
+        'Total_Retail': 'RSXFS',            # 零售总计
+        'Recession': 'USREC'                # 官方衰退期 (1代表衰退中)
     }
     
-    combined_data = pd.DataFrame()
-    
+    df_map = {}
     for name, s_id in series_map.items():
         try:
-            s = fred.get_series(s_id, observation_start=start_date)
-            # 确保索引对齐
-            combined_data[name] = s
-        except Exception as e:
-            st.warning(f"无法加载指标 {name} (ID: {s_id})。逻辑将跳过此指标。")
+            df_map[name] = fred.get_series(s_id, observation_start=start_date)
+        except:
+            st.sidebar.warning(f"无法加载 {name}")
             
-    if combined_data.empty:
-        return None
-        
-    return combined_data.ffill().dropna()
+    df = pd.DataFrame(df_map).ffill().dropna()
+    return df
 
-# --- 执行逻辑 ---
-start_dt = datetime(start_year, 1, 1)
-data = get_economic_data(api_key, start_dt)
+# --- 执行 ---
+data = get_pro_data(api_key, datetime(start_year, 1, 1))
 
-if data is not None and not data.empty:
-    # 动态检查哪些列可用
-    cols = data.columns.tolist()
+if data is not None:
+    # 指标计算
+    data['Lipstick_Index'] = (data['Lipstick_Proxy'] / data['Total_Retail']) * 100
     
-    # 1. 计算口红指数 (如果相关列都存在)
-    if 'Lipstick_Proxy' in cols and 'Total_Retail' in cols:
-        data['Lipstick_Index'] = (data['Lipstick_Proxy'] / data['Total_Retail']) * 100
-    
-    # 2. 归一化处理（用于图表对比波动）
-    data_norm = (data - data.min()) / (data.max() - data.min())
+    # 归一化处理 (避开单一点的干扰)
+    def normalize(s):
+        return (s - s.min()) / (s.max() - s.min())
 
-    # --- 仪表盘展示 ---
-    st.subheader("🚩 核心预警状态")
-    metrics_cols = st.columns(len(cols))
-    
-    latest = data.iloc[-1]
-    prev = data.iloc[-2]
-    
-    # 动态渲染 Metric 卡片
-    for i, col in enumerate(cols):
-        with metrics_cols[i]:
-            val = latest[col]
-            diff = val - prev[col]
-            if col == 'Unemployment':
-                st.metric("失业率", f"{val}%", f"{diff:.2f}%", delta_color="inverse")
-            elif col == 'Lipstick_Proxy':
-                st.metric("个人护理(M$)", f"{val:,.0f}", f"{diff:,.0f}")
-            elif col == 'Menswear_Proxy':
-                st.metric("男装零售(M$)", f"{val:,.0f}", f"{diff:,.0f}", delta_color="normal" if diff > 0 else "inverse")
-            elif col == 'Total_Retail':
-                st.metric("零售总计(M$)", f"{val:,.0f}", f"{diff:,.0f}")
-
-    # --- 图表可视化 ---
-    st.subheader("📈 趋势对比 (归一化)")
+    # --- 绘图 ---
     fig = go.Figure()
-    
-    if 'Lipstick_Index' in data.columns:
-        fig.add_trace(go.Scatter(x=data.index, y=data_norm['Lipstick_Index'], name="口红效应 (化妆品占比)", line=dict(color='#FF4B4B', width=3)))
-    
+
+    # 1. 绘制官方衰退阴影 (历史背景)
+    recession_periods = data[data['Recession'] == 1]
+    if not recession_periods.empty:
+        fig.add_trace(go.Scatter(
+            x=data.index, y=data['Recession'],
+            fill='tozeroy', mode='none',
+            fillcolor='rgba(255, 0, 0, 0.1)',
+            name='NBER 官方衰退期'
+        ))
+
+    # 2. 口红效应 (占比趋势)
+    fig.add_trace(go.Scatter(
+        x=data.index, y=normalize(data['Lipstick_Index']),
+        name="口红效应 (占比趋势)",
+        line=dict(color='#FF4B4B', width=3)
+    ))
+
+    # 3. 男装需求 (内裤指标)
     if 'Menswear_Proxy' in data.columns:
-        fig.add_trace(go.Scatter(x=data.index, y=data_norm['Menswear_Proxy'], name="男装需求", line=dict(color='#0068C9', width=2)))
-    
-    if 'Unemployment' in data.columns:
-        fig.add_trace(go.Scatter(x=data.index, y=data_norm['Unemployment'], name="失业率 (基准)", fill='tozeroy', line=dict(color='rgba(128, 128, 128, 0.2)')))
-    
-    fig.update_layout(template="plotly_dark", hovermode="x unified", height=500, margin=dict(t=30, b=30))
+        fig.add_trace(go.Scatter(
+            x=data.index, y=normalize(data['Menswear_Proxy']),
+            name="男装需求 (内裤指标)",
+            line=dict(color='#0068C9', width=2, dash='dot')
+        ))
+
+    # 4. 失业率 (作为对比)
+    fig.add_trace(go.Scatter(
+        x=data.index, y=normalize(data['Unemployment']),
+        name="失业率趋势",
+        line=dict(color='rgba(255, 255, 255, 0.4)', width=1)
+    ))
+
+    fig.update_layout(
+        template="plotly_dark",
+        height=600,
+        hovermode="x unified",
+        title=f"{start_year} 年以来的历史指标联动 (已归一化)",
+        yaxis=dict(title="压力指数 (0-1)"),
+        showlegend=True
+    )
+
     st.plotly_chart(fig, use_container_width=True)
 
-    # --- 逻辑分析 ---
-    st.info("💡 **观察提示**：当红色线条（口红占比）在失业率显著上升之前出现异常的尖峰，通常是经济衰退的先行信号。")
-    
-    with st.expander("查看数据底表"):
-        st.dataframe(data.tail(20))
-else:
-    st.error("无法加载任何数据，请检查 API Key 或网络。")
+    # --- 预警逻辑说明 ---
+    st.subheader("💡 如何阅读此图？")
+    cols = st.columns(2)
+    with cols[0]:
+        st.write("**历史经验：**")
+        st.write("- 在 2008 年衰退前，口红占比（红线）出现了显著的平台期抬升。")
+        st.write("- 在 2020 年衰退时，所有指标瞬间崩塌。")
+    with cols[1]:
+        st.write("**当前状况：**")
+        latest_val = data['Lipstick_Index'].iloc[-1]
+        avg_val = data['Lipstick_Index'].rolling(12).mean().iloc[-1]
+        if latest_val > avg_val:
+            st.warning(f"⚠️ 预警：当前口红占比 ({latest_val:.2f}%) 高于 12 个月均值 ({avg_val:.2f}%)，符合新闻中的衰退逻辑。")
+        else:
+            st.success("✅ 正常：口红占比目前处于相对平稳区间。")
+
+    with st.expander("原始数据对齐表"):
+        st.dataframe(data.tail(12))
