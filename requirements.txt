@@ -1,4 +1,5 @@
 streamlit
 pandas
-pandas-datareader
+fredapi
 plotly
+setuptools
